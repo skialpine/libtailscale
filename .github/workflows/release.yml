@@ -1,0 +1,157 @@
+# Builds prebuilt libtailscale artifacts for Decenza (macOS, iOS, Android) and
+# publishes them as a GitHub Release. Decenza's CMake downloads these so the app
+# build needs no Go toolchain.
+#
+# Trigger: push a tag matching `decenza-v*` (e.g. decenza-v1.94.1-1), or run
+# manually via workflow_dispatch.
+name: release
+
+on:
+  push:
+    tags:
+      - "decenza-v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  GO_VERSION: "1.25.5"
+  # Keep in sync with the Makefile MACOS_TARGET.
+  MACOS_TARGET: "15.0"
+
+jobs:
+  macos:
+    runs-on: macos-14   # Apple Silicon runner
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Build macOS c-archive (arm64 + amd64 → universal)
+        run: |
+          set -euxo pipefail
+          # Native arm64
+          CGO_ENABLED=1 GOARCH=arm64 \
+            CGO_CFLAGS="-mmacos-version-min=${MACOS_TARGET}" \
+            CGO_LDFLAGS="-mmacos-version-min=${MACOS_TARGET}" \
+            MACOSX_DEPLOYMENT_TARGET=${MACOS_TARGET} \
+            go build -buildmode=c-archive -o libtailscale-macos-arm64.a
+          # Cross amd64
+          CGO_ENABLED=1 GOARCH=amd64 CC="clang -arch x86_64" \
+            CGO_CFLAGS="-mmacos-version-min=${MACOS_TARGET}" \
+            CGO_LDFLAGS="-mmacos-version-min=${MACOS_TARGET}" \
+            MACOSX_DEPLOYMENT_TARGET=${MACOS_TARGET} \
+            go build -buildmode=c-archive -o libtailscale-macos-amd64.a
+          lipo -create -output libtailscale.a libtailscale-macos-arm64.a libtailscale-macos-amd64.a
+          lipo -info libtailscale.a
+      - name: Package
+        run: |
+          set -euxo pipefail
+          mkdir -p out/libtailscale-macos/include
+          cp libtailscale.a out/libtailscale-macos/
+          cp tailscale.h out/libtailscale-macos/include/
+          (cd out && zip -r libtailscale-macos.zip libtailscale-macos)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libtailscale-macos
+          path: out/libtailscale-macos.zip
+
+  ios:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Build iOS device + simulator archives
+        run: |
+          set -euxo pipefail
+          make c-archive-ios          # libtailscale_ios.a (device arm64)
+          make c-archive-ios-sim      # libtailscale_ios_sim.a (fat sim)
+      - name: Assemble C-library xcframework
+        run: |
+          set -euxo pipefail
+          mkdir -p include && cp tailscale.h include/
+          rm -rf libtailscale.xcframework
+          xcodebuild -create-xcframework \
+            -library libtailscale_ios.a -headers include \
+            -library libtailscale_ios_sim.a -headers include \
+            -output libtailscale.xcframework
+      - name: Package
+        run: |
+          set -euxo pipefail
+          mkdir -p out
+          zip -r out/libtailscale-ios.zip libtailscale.xcframework
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libtailscale-ios
+          path: out/libtailscale-ios.zip
+
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Build Android .so for all ABIs
+        run: |
+          set -euxo pipefail
+          test -n "${ANDROID_NDK_LATEST_HOME:-}" && echo "NDK: $ANDROID_NDK_LATEST_HOME"
+          make android NDK="$ANDROID_NDK_LATEST_HOME" NDK_HOST=linux-x86_64 ANDROID_API=28
+          find android -name '*.so' -print
+      - name: Package
+        run: |
+          set -euxo pipefail
+          mkdir -p out/libtailscale-android/include
+          cp -r android out/libtailscale-android/jniLibs
+          # Drop the per-ABI generated headers; ship the public header only.
+          find out/libtailscale-android/jniLibs -name '*.h' -delete
+          cp tailscale.h out/libtailscale-android/include/
+          (cd out && zip -r libtailscale-android.zip libtailscale-android)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libtailscale-android
+          path: out/libtailscale-android.zip
+
+  release:
+    needs: [macos, ios, android]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: Flatten + checksums + manifest
+        run: |
+          set -euxo pipefail
+          mkdir -p release
+          find dist -name '*.zip' -exec cp {} release/ \;
+          cd release
+          sha256sum *.zip > SHA256SUMS.txt
+          # Minimal machine-readable manifest for Decenza's CMake to consume.
+          {
+            echo '{'
+            echo "  \"tag\": \"${GITHUB_REF_NAME}\","
+            echo '  "artifacts": {'
+            first=1
+            for z in *.zip; do
+              sha=$(sha256sum "$z" | awk '{print $1}')
+              [ $first -eq 1 ] || echo ','
+              first=0
+              printf '    "%s": "%s"' "$z" "$sha"
+            done
+            echo ''
+            echo '  }'
+            echo '}'
+          } > manifest.json
+          cat manifest.json
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/*.zip
+            release/SHA256SUMS.txt
+            release/manifest.json
+          fail_on_unmatched_files: true
+          generate_release_notes: true

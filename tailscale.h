@@ -191,6 +191,31 @@ extern int tailscale_loopback(tailscale sd, char* addr_out, size_t addrlen, char
 // 	-1    - other error, details printed to the tsnet logger
 extern int tailscale_enable_funnel_to_localhost_plaintext_http1(tailscale sd, int localhostPort);
 
+// tailscale_get_cert_domain writes the node's Funnel/HTTPS domain (e.g.
+// "myhost.tailnet-name.ts.net") to buf, NUL-terminated. This is the hostname a
+// public client (and the Funnel cert) uses. Empty until the node is up and has
+// been issued a cert domain.
+//
+// Returns:
+// 	0      - success
+// 	EBADF  - sd is not a valid tailscale
+// 	ERANGE - insufficient storage for buf
+// 	-1     - other error, call tailscale_errmsg for details
+extern int tailscale_get_cert_domain(tailscale sd, char* buf, size_t buflen);
+
+// tailscale_get_auth_url writes the interactive login URL to buf, NUL-terminated.
+// Empty when the node is already authorized (no login needed). Surface this as a
+// link/QR code during first-time setup.
+//
+// Returns: as tailscale_get_cert_domain.
+extern int tailscale_get_auth_url(tailscale sd, char* buf, size_t buflen);
+
+// tailscale_get_backend_state writes the ipn backend state to buf, NUL-terminated
+// (e.g. "NoState", "NeedsLogin", "NeedsMachineAuth", "Starting", "Running").
+//
+// Returns: as tailscale_get_cert_domain.
+extern int tailscale_get_backend_state(tailscale sd, char* buf, size_t buflen);
+
 // tailscale_errmsg writes the details of the last error to buf.
 // 
 // After returning, buf is always NUL-terminated.

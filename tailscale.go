@@ -621,3 +621,86 @@ func TsnetEnableFunnelToLocalhostPlaintextHttp1(sd C.int, localhostPort C.int) C
 
 	return 0
 }
+
+// writeCString copies str into the C buffer out, always NUL-terminating.
+// Returns 0 on success or C.ERANGE if the buffer was too small.
+func writeCString(str string, buf *C.char, buflen C.size_t) C.int {
+	out := unsafe.Slice((*byte)(unsafe.Pointer(buf)), buflen)
+	n := copy(out, str)
+	if n >= len(out) {
+		out[len(out)-1] = '\x00' // always NUL-terminate
+		return C.ERANGE
+	}
+	out[n] = '\x00'
+	return 0
+}
+
+//export TsnetGetCertDomain
+func TsnetGetCertDomain(sd C.int, buf *C.char, buflen C.size_t) C.int {
+	if buf == nil || buflen == 0 {
+		panic("TsnetGetCertDomain passed nil buf or buflen of 0")
+	}
+	s := getServer(sd)
+	if s == nil {
+		out := unsafe.Slice((*byte)(unsafe.Pointer(buf)), buflen)
+		out[0] = '\x00'
+		return C.EBADF
+	}
+	lc, err := s.s.LocalClient()
+	if err != nil {
+		return s.recErr(err)
+	}
+	st, err := lc.StatusWithoutPeers(context.Background())
+	if err != nil {
+		return s.recErr(err)
+	}
+	domain := ""
+	if len(st.CertDomains) > 0 {
+		domain = st.CertDomains[0]
+	}
+	return writeCString(domain, buf, buflen)
+}
+
+//export TsnetGetAuthURL
+func TsnetGetAuthURL(sd C.int, buf *C.char, buflen C.size_t) C.int {
+	if buf == nil || buflen == 0 {
+		panic("TsnetGetAuthURL passed nil buf or buflen of 0")
+	}
+	s := getServer(sd)
+	if s == nil {
+		out := unsafe.Slice((*byte)(unsafe.Pointer(buf)), buflen)
+		out[0] = '\x00'
+		return C.EBADF
+	}
+	lc, err := s.s.LocalClient()
+	if err != nil {
+		return s.recErr(err)
+	}
+	st, err := lc.StatusWithoutPeers(context.Background())
+	if err != nil {
+		return s.recErr(err)
+	}
+	return writeCString(st.AuthURL, buf, buflen)
+}
+
+//export TsnetGetBackendState
+func TsnetGetBackendState(sd C.int, buf *C.char, buflen C.size_t) C.int {
+	if buf == nil || buflen == 0 {
+		panic("TsnetGetBackendState passed nil buf or buflen of 0")
+	}
+	s := getServer(sd)
+	if s == nil {
+		out := unsafe.Slice((*byte)(unsafe.Pointer(buf)), buflen)
+		out[0] = '\x00'
+		return C.EBADF
+	}
+	lc, err := s.s.LocalClient()
+	if err != nil {
+		return s.recErr(err)
+	}
+	st, err := lc.StatusWithoutPeers(context.Background())
+	if err != nil {
+		return s.recErr(err)
+	}
+	return writeCString(st.BackendState, buf, buflen)
+}
