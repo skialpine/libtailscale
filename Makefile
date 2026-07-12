@@ -8,6 +8,11 @@ endif
 
 export CGO_ENABLED=1
 
+# Strip the Go symbol table (-s) and DWARF debug info (-w) from every build to
+# keep the prebuilt libs (and the apps that link them) lean. Safe for
+# c-archive/c-shared: the exported C symbols are preserved.
+GO_LDFLAGS := -s -w
+
 # This should match the minimum target in the xCode project
 # The wrapper lib currently requires features available in
 # MacOS 15.0 (Sequoia)
@@ -32,21 +37,21 @@ NDK_HOST ?= linux-x86_64
 ANDROID_TOOLCHAIN := $(NDK)/toolchains/llvm/prebuilt/$(NDK_HOST)/bin
 
 libtailscale.so:
-	$(DARWIN_DEPLOYMENT_TARGET) CGO_CFLAGS="$(CGO_CFLAGS) $(DARWIN_CGO_CFLAGS)" CGO_LDFLAGS="$(CGO_LDFLAGS) $(DARWIN_CGO_LDFLAGS)" go build -v -buildmode=c-shared -o $@
+	$(DARWIN_DEPLOYMENT_TARGET) CGO_CFLAGS="$(CGO_CFLAGS) $(DARWIN_CGO_CFLAGS)" CGO_LDFLAGS="$(CGO_LDFLAGS) $(DARWIN_CGO_LDFLAGS)" go build -v -ldflags "$(GO_LDFLAGS)" -buildmode=c-shared -o $@
 
 libtailscale.a:
-	$(DARWIN_DEPLOYMENT_TARGET) CGO_CFLAGS="$(CGO_CFLAGS) $(DARWIN_CGO_CFLAGS)" CGO_LDFLAGS="$(CGO_LDFLAGS) $(DARWIN_CGO_LDFLAGS)" go build -buildmode=c-archive -o $@
+	$(DARWIN_DEPLOYMENT_TARGET) CGO_CFLAGS="$(CGO_CFLAGS) $(DARWIN_CGO_CFLAGS)" CGO_LDFLAGS="$(CGO_LDFLAGS) $(DARWIN_CGO_LDFLAGS)" go build -ldflags "$(GO_LDFLAGS)" -buildmode=c-archive -o $@
 
 libtailscale_ios.a:
 	# TODO(raggi): setup a PREFIX in the libtailscale.a build, then delete these targets, the caller should be setting PREFIX and CC
 	# that way the caller can also use the prefix, and not have to specialize target/link object names per build configuration.
-	GOOS=ios GOARCH=arm64 CC=$(PWD)/swift/script/clangwrap-ios.sh go build -v -ldflags -w -tags ios -o $@ -buildmode=c-archive
+	GOOS=ios GOARCH=arm64 CC=$(PWD)/swift/script/clangwrap-ios.sh go build -v -ldflags "$(GO_LDFLAGS)" -tags ios -o $@ -buildmode=c-archive
 
 libtailscale_ios_sim_arm64.a:
-	GOOS=ios GOARCH=arm64 CC=$(PWD)/swift/script/clangwrap-ios-sim-arm.sh go build -v -ldflags -w -tags ios -o $@ -buildmode=c-archive
+	GOOS=ios GOARCH=arm64 CC=$(PWD)/swift/script/clangwrap-ios-sim-arm.sh go build -v -ldflags "$(GO_LDFLAGS)" -tags ios -o $@ -buildmode=c-archive
 
 libtailscale_ios_sim_x86_64.a:
-	GOOS=ios GOARCH=amd64 CC=$(PWD)/swift/script/clangwrap-ios-sim-x86.sh go build -v -ldflags -w -tags ios -o $@ -buildmode=c-archive
+	GOOS=ios GOARCH=amd64 CC=$(PWD)/swift/script/clangwrap-ios-sim-x86.sh go build -v -ldflags "$(GO_LDFLAGS)" -tags ios -o $@ -buildmode=c-archive
 
 .PHONY: c-archive-ios
 c-archive-ios: libtailscale_ios.a  ## Builds libtailscale_ios.a for iOS (iOS SDK required)
@@ -63,19 +68,19 @@ android/arm64-v8a/libtailscale.so:
 	mkdir -p $(dir $@)
 	CGO_ENABLED=1 GOOS=android GOARCH=arm64 \
 	  CC=$(ANDROID_TOOLCHAIN)/aarch64-linux-android$(ANDROID_API)-clang \
-	  go build -v -ldflags -w -buildmode=c-shared -o $@
+	  go build -v -ldflags "$(GO_LDFLAGS)" -buildmode=c-shared -o $@
 
 android/armeabi-v7a/libtailscale.so:
 	mkdir -p $(dir $@)
 	CGO_ENABLED=1 GOOS=android GOARCH=arm GOARM=7 \
 	  CC=$(ANDROID_TOOLCHAIN)/armv7a-linux-androideabi$(ANDROID_API)-clang \
-	  go build -v -ldflags -w -buildmode=c-shared -o $@
+	  go build -v -ldflags "$(GO_LDFLAGS)" -buildmode=c-shared -o $@
 
 android/x86_64/libtailscale.so:
 	mkdir -p $(dir $@)
 	CGO_ENABLED=1 GOOS=android GOARCH=amd64 \
 	  CC=$(ANDROID_TOOLCHAIN)/x86_64-linux-android$(ANDROID_API)-clang \
-	  go build -v -ldflags -w -buildmode=c-shared -o $@
+	  go build -v -ldflags "$(GO_LDFLAGS)" -buildmode=c-shared -o $@
 
 .PHONY: android
 android: android/arm64-v8a/libtailscale.so android/armeabi-v7a/libtailscale.so android/x86_64/libtailscale.so ## Builds Android c-shared .so for all shipped ABIs (NDK required)
