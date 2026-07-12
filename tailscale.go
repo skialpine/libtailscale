@@ -598,6 +598,13 @@ func TsnetEnableFunnelToLocalhostPlaintextHttp1(sd C.int, localhostPort C.int) C
 	if err != nil {
 		return s.recErr(err)
 	}
+	// Guard against indexing an empty slice: CertDomains is empty until the node
+	// is up and has been issued a Funnel cert (login + funnel-attribute approval).
+	// Without this, enabling Funnel too early panics and takes down the Go
+	// runtime (and the embedding app) — return an error instead.
+	if len(st.CertDomains) == 0 {
+		return s.recErr(fmt.Errorf("libtailscale: no Funnel cert domain yet (node not up, or Funnel not approved for this tailnet)"))
+	}
 	domain := st.CertDomains[0]
 
 	hp := ipn.HostPort(net.JoinHostPort(domain, strconv.Itoa(443)))
@@ -646,17 +653,12 @@ func TsnetGetCertDomain(sd C.int, buf *C.char, buflen C.size_t) C.int {
 		out[0] = '\x00'
 		return C.EBADF
 	}
-	lc, err := s.s.LocalClient()
-	if err != nil {
-		return s.recErr(err)
-	}
-	st, err := lc.StatusWithoutPeers(context.Background())
-	if err != nil {
-		return s.recErr(err)
-	}
+	// tsnet.Server.CertDomains() is the direct accessor (no LocalClient/status
+	// round-trip). Empty until the node is up with a Funnel cert.
+	domains := s.s.CertDomains()
 	domain := ""
-	if len(st.CertDomains) > 0 {
-		domain = st.CertDomains[0]
+	if len(domains) > 0 {
+		domain = domains[0]
 	}
 	return writeCString(domain, buf, buflen)
 }

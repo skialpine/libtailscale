@@ -1,10 +1,17 @@
+libtailscale
 libtailscale.so
+libtailscale.dylib
 libtailscale.a
 libtailscale.h
 libtailscale.tar*
 libtailscale_*.a
 libtailscale_*.h
 libtailscale.bundle
+libtailscale.xcframework/
+libtailscale-macos-*.a
+/android/
+/include/
+/out/
 
 /tstestcontrol/libtstestcontrol.a
 /tstestcontrol/libtstestcontrol.h
