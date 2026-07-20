@@ -31,18 +31,23 @@ jobs:
       - name: Build macOS c-archive (arm64 + amd64 → universal)
         run: |
           set -euxo pipefail
+          # This job builds via raw `go build` (not `make libtailscale.a`) so it can
+          # lipo two GOARCHes together; TAGS is read from the Makefile so this can't
+          # silently drift out of sync with the ts_omit_* set used everywhere else.
+          TAGS="$(make print-tags)"
+          echo "TS_OMIT_TAGS: ${TAGS}"
           # Native arm64
           CGO_ENABLED=1 GOARCH=arm64 \
             CGO_CFLAGS="-mmacos-version-min=${MACOS_TARGET}" \
             CGO_LDFLAGS="-mmacos-version-min=${MACOS_TARGET}" \
             MACOSX_DEPLOYMENT_TARGET=${MACOS_TARGET} \
-            go build -buildmode=c-archive -o libtailscale-macos-arm64.a
+            go build -tags "${TAGS}" -buildmode=c-archive -o libtailscale-macos-arm64.a
           # Cross amd64
           CGO_ENABLED=1 GOARCH=amd64 CC="clang -arch x86_64" \
             CGO_CFLAGS="-mmacos-version-min=${MACOS_TARGET}" \
             CGO_LDFLAGS="-mmacos-version-min=${MACOS_TARGET}" \
             MACOSX_DEPLOYMENT_TARGET=${MACOS_TARGET} \
-            go build -buildmode=c-archive -o libtailscale-macos-amd64.a
+            go build -tags "${TAGS}" -buildmode=c-archive -o libtailscale-macos-amd64.a
           lipo -create -output libtailscale.a libtailscale-macos-arm64.a libtailscale-macos-amd64.a
           lipo -info libtailscale.a
       - name: Package

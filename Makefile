@@ -104,6 +104,10 @@ c-archive: libtailscale.a  ## Builds libtailscale.a for the target platform
 .PHONY: shared
 shared: libtailscale.so ## Builds libtailscale.so for the target platform
 
+.PHONY: print-tags
+print-tags: ## Print TS_OMIT_TAGS (for CI steps that can't route through this Makefile, e.g. release.yml's lipo'd macOS build)
+	@echo $(TS_OMIT_TAGS)
+
 .PHONY: clean
 clean: ## Clean up build artifacts
 	rm -f libtailscale*.h
