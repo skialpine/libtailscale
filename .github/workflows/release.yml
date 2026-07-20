@@ -24,8 +24,8 @@ jobs:
   macos:
     runs-on: macos-14   # Apple Silicon runner
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
       - name: Build macOS c-archive (arm64 + amd64 → universal)
@@ -57,7 +57,7 @@ jobs:
           cp libtailscale.a out/libtailscale-macos/
           cp tailscale.h out/libtailscale-macos/include/
           (cd out && zip -r libtailscale-macos.zip libtailscale-macos)
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: libtailscale-macos
           path: out/libtailscale-macos.zip
@@ -65,8 +65,8 @@ jobs:
   ios:
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
       - name: Build iOS device + simulator archives
@@ -88,7 +88,7 @@ jobs:
           set -euxo pipefail
           mkdir -p out
           zip -r out/libtailscale-ios.zip libtailscale.xcframework
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: libtailscale-ios
           path: out/libtailscale-ios.zip
@@ -96,8 +96,8 @@ jobs:
   android:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
       - name: Build Android .so for all ABIs
@@ -115,7 +115,7 @@ jobs:
           find out/libtailscale-android/jniLibs -name '*.h' -delete
           cp tailscale.h out/libtailscale-android/include/
           (cd out && zip -r libtailscale-android.zip libtailscale-android)
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: libtailscale-android
           path: out/libtailscale-android.zip
@@ -124,7 +124,7 @@ jobs:
     needs: [macos, ios, android]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
       - name: Flatten + checksums + manifest
@@ -152,7 +152,7 @@ jobs:
           } > manifest.json
           cat manifest.json
       - name: Publish release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             release/*.zip
