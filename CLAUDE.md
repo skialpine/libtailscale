@@ -117,6 +117,95 @@ Re-derive this with `go list -deps -json` against the pinned `tailscale.com`
 version before trusting it again after a version bump; buildfeatures wiring
 can change between releases.
 
+## LocalAPI `OmitAuth` — second instance of the fork-under-ASan crash
+
+`ts_omit_ssh` above fixed one `exec.Command` reachable on macOS. It was not the
+only one. `local.Client.DoLocalRequest` attaches a Basic-Auth header on every
+LocalAPI request unless `OmitAuth` is set, and on darwin that lookup resolves
+to `safesocket_darwin.go`'s `readMacosSameUserProof()`, which runs
+`lsof -n -a -u<uid> -c IPNExtension -F`. One fork+exec **per LocalAPI request**
+— and `TsnetGetAuthURL`/`TsnetGetBackendState` are polled by Decenza during
+connect, so it fired repeatedly. Same signature as the `dscl` crash:
+`EXC_BREAKPOINT`/`SIGKILL`, "BUG IN CLIENT OF LIBPLATFORM: os_unfair_lock is
+corrupt", "crashed on child side of fork pre-exec".
+
+It was pure waste even when it didn't crash. That lookup exists so a
+non-sandboxed CLI can find the **Mac App Store Tailscale GUI's** random
+LocalAPI port and token. tsnet serves its own LocalAPI over an in-process
+`memnet` listener and sets no `RequiredPassword` on that handler, so the token
+is never checked; on a Mac with no Tailscale GUI installed `lsof` matches
+nothing and the lookup fails anyway. `lsof -u` walks every fd of every process
+the user owns.
+
+Fixed by setting `OmitAuth` on the shared `*local.Client`. What justifies that
+is the `RequiredPassword` point above — the token is never checked — and not
+upstream's blessing. `OmitAuth`'s own doc comment describes something narrower
+than our case: "meant for when Dial is set and the LocalAPI is being proxied
+**to a different operating system, such as in integration tests**." Ours is
+in-process and same-OS. Same mechanism, different scenario; don't cite that
+comment as upstream having sanctioned this use.
+
+**Routing our own call sites through a helper is NOT sufficient, and believing
+it was is the mistake this section exists to prevent.** `tsnet.Server.Up`
+obtains the same shared client itself and issues `WatchIPNBus`, `Status` and
+`SetServeConfig` on it — and `Up` runs *before* anything polls status. The
+first version of this fix converted only the three call sites in `tailscale.go`
+and measured **zero** improvement: 6 `lsof` forks before, 6 after (see below).
+So `OmitAuth` is primed by `(*server).primeLocalClient()` from `TsnetStart` and
+`TsnetUp`, before the server can service any request. The `sync.Once` alone
+would also be a genuine data race — it orders callers of `Do` against each
+other, and tsnet's readers never call it. Priming is what supplies the
+ordering; the Once only guarantees a single write.
+
+**Verified at runtime, by measurement.** The `strings`-diff technique used for
+`dscl` proves nothing here — this is a runtime fix, `safesocket_darwin.go` is
+still linked and `"lsof"` is still in the archive. Instead, put a recording
+shim named `lsof` first on `PATH` and run `go test -run TestConn`, which drives
+a full `tailscale_up()` cycle against the in-process test control server:
+
+| tree | `lsof` forks |
+|---|---|
+| before any fix | 6 |
+| helper only, no priming | 6 |
+| helper + priming | **0** |
+
+`TestLocalAPIGoesThroughOmitAuthHelper` in `tailscale_test.go` is the
+regression guard for the source side: it parses **every non-test `.go` file in
+the package** (not just `tailscale.go` — package `main` has others, and build
+tags are deliberately not evaluated) and fails on any `LocalClient()` reached
+outside the helper, including via a method value or a package-level `var`.
+Note its limit: it cannot see tsnet's own calls, which is exactly why the
+priming exists. A green run is not proof the forks are gone; the shim is.
+
+**Audit result, so this doesn't get re-derived from scratch:** every file
+actually compiled into the macOS artifact was scanned (`go list -deps` with
+`TS_OMIT_TAGS`, 530 packages / 2511 files) for `exec.Command`,
+`exec.CommandContext`, `exec.LookPath`, `syscall.StartProcess` and
+`syscall.ForkExec`. 16 hits (1 fixed + 2 near-misses + 13 guarded — do not
+count `os/exec_posix.go`'s own `syscall.StartProcess`, which is the shared
+primitive every `exec.Command` already routes through, not a distinct site).
+After this fix **none are reachable on macOS**. Two are worth knowing about:
+
+- `safesocket/unixsocket.go:77` runs `launchctl list com.tailscale.tailscaled`
+  and *is* darwin-active — the GOOS guard passes. It is unreachable only
+  because its sole caller is `safesocket.Listen`, which tsnet never calls (it
+  uses `memnet.Listen`). If anything ever routes through `safesocket.Listen`,
+  this forks.
+- `util/osuser/user.go:142` runs `getent passwd` with no GOOS guard excluding
+  darwin, and `ipn/ipnlocal` imports it. It doesn't fork only because macOS has
+  no `getent`: `exec.Command` does `LookPath` at construction, fails, and
+  `Start` returns without forking. Fragile-by-luck, not guarded.
+
+The remaining 13: nine guarded to linux (`hostinfo.go:488`,
+`ip_forward.go:322`, `local.go:1079`, `direct.go:98/105/114`,
+`group_ids.go:48`, `logpolicy.go:384` — that last one linux/freebsd/openbsd),
+one to illumos/solaris (`ip_forward.go:345`, `ipadm`), one to Synology
+(`synology.go:28`), and three in `assets.go:85/90/126` (`yarn`/`node`/`git`)
+which are gated by a `devMode` flag rather than by GOOS at all. **None is
+Windows-guarded** — an earlier version of this paragraph said "windows" and
+omitted illumos/solaris, which is the kind of unchecked detail this file exists
+to stop. Re-run the audit after a `tailscale.com` bump.
+
 ## Do not reintroduce: `-s -w` symbol stripping
 
 Tried in `f9667b5` ("Strip Go symbol table + DWARF (-s -w) from all builds"),

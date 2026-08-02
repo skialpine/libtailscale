@@ -21,6 +21,7 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/unix"
+	"tailscale.com/client/local"
 	"tailscale.com/hostinfo"
 	"tailscale.com/ipn"
 	"tailscale.com/tsnet"
@@ -40,6 +41,73 @@ type server struct {
 	s       *tsnet.Server
 	lastErr string
 	started bool
+
+	omitAuthOnce sync.Once
+}
+
+// localClient returns the server's LocalAPI client with OmitAuth set.
+//
+// Every request through local.Client goes through DoLocalRequest, which by
+// default calls safesocket.LocalTCPPortAndToken() to attach a Basic-Auth
+// header (client/local/local.go). On macOS that resolves to
+// readMacosSameUserProof(), which runs `lsof -n -a -u<uid> -c IPNExtension -F`
+// — one fork+exec per LocalAPI request. Its purpose is to find the LocalAPI
+// port and token of the sandboxed Mac App Store Tailscale GUI, which has
+// nothing to do with us: tsnet serves its own LocalAPI over an in-process
+// memnet listener and sets no RequiredPassword on that handler
+// (tsnet/tsnet.go, where localClient is built as &local.Client{Dial: lal.Dial}).
+// So the token is never checked, and on a Mac without the GUI app installed
+// lsof matches nothing and the lookup fails anyway. Pure waste — and `lsof -u`
+// walks every fd of every process owned by the user, so it is not cheap.
+//
+// It is also a crash: Decenza ships ASan-instrumented debug builds, and
+// fork() in a multithreaded ASan process can inherit a permanently-locked
+// allocator lock in the child ("BUG IN CLIENT OF LIBPLATFORM: os_unfair_lock
+// is corrupt", "crashed on child side of fork pre-exec"). Same failure mode
+// as the `dscl` exec that ts_omit_ssh fixed; see CLAUDE.md. TsnetGetAuthURL
+// and TsnetGetBackendState are polled during connect, so this fired often.
+//
+// What justifies skipping auth is the RequiredPassword point above, not
+// upstream's blessing: local.go's own comment on OmitAuth describes a
+// narrower scenario than ours — "meant for when Dial is set and the LocalAPI
+// is being proxied to a different operating system, such as in integration
+// tests." Ours is in-process and same-OS. The mechanism is identical (skip a
+// header nothing validates), but do not read that comment as upstream having
+// sanctioned this exact use.
+//
+// Ordering, not locking, is what makes the write safe. sync.Once alone would
+// NOT: it synchronizes callers of Do with each other, and the readers that
+// matter never call it — tsnet publishes this same *local.Client to its own
+// backend and reads OmitAuth from other goroutines (tsnet.Server.Up, getCert,
+// ConfigureWebClient). A Do() concurrent with one of those is a plain data
+// race on the field.
+//
+// So the flag is primed by primeLocalClient() from TsnetStart and TsnetUp,
+// before the server can service any LocalAPI request, and the Once then
+// guarantees the write happens exactly once and never again. Every subsequent
+// read — ours or tsnet's — is ordered after it. Do not "simplify" this by
+// dropping the priming calls and relying on the helper alone.
+func (s *server) localClient() (*local.Client, error) {
+	lc, err := s.s.LocalClient()
+	if err != nil {
+		return nil, err
+	}
+	s.omitAuthOnce.Do(func() { lc.OmitAuth = true })
+	return lc, nil
+}
+
+// primeLocalClient sets OmitAuth before any LocalAPI request can be issued.
+//
+// Routing our own three call sites through localClient() is not enough:
+// tsnet.Server.Up obtains the shared client itself and issues WatchIPNBus,
+// Status and SetServeConfig on it, and Up runs before anything polls status.
+// Without priming, those three requests fork lsof on the connect path — the
+// exact crash this change exists to remove — and only later calls were fixed.
+//
+// Errors are deliberately swallowed: the caller is about to call Start/Up and
+// will surface a real failure with better context. Priming is best-effort.
+func (s *server) primeLocalClient() {
+	_, _ = s.localClient()
 }
 
 func getServer(sd C.int) *server {
@@ -111,6 +179,7 @@ func TsnetStart(sd C.int) C.int {
 	err := s.s.Start()
 	if err == nil {
 		s.started = true
+		s.primeLocalClient() // before anything can issue a LocalAPI request
 	}
 	return s.recErr(err)
 }
@@ -121,6 +190,9 @@ func TsnetUp(sd C.int) C.int {
 	if s == nil {
 		return C.EBADF
 	}
+	// Up starts the server itself if it isn't already, then issues LocalAPI
+	// requests on the shared client. Prime first — this also starts it.
+	s.primeLocalClient()
 	_, err := s.s.Up(context.Background()) // cancellation is via TsnetClose
 	if err == nil {
 		s.started = true
@@ -589,7 +661,7 @@ func TsnetEnableFunnelToLocalhostPlaintextHttp1(sd C.int, localhostPort C.int) C
 	}
 
 	ctx := context.Background()
-	lc, err := s.s.LocalClient()
+	lc, err := s.localClient()
 	if err != nil {
 		return s.recErr(err)
 	}
@@ -621,9 +693,15 @@ func TsnetEnableFunnelToLocalhostPlaintextHttp1(sd C.int, localhostPort C.int) C
 		},
 	}
 
-	lc.SetServeConfig(ctx, sc)
-	if !sc.AllowFunnel[hp] {
-		return s.recErr(fmt.Errorf("libtailscale: failed to enable funnel"))
+	// SetServeConfig's error is the only signal that Funnel was refused —
+	// tailnet policy, Funnel not approved for the node, or an If-Match/ETag
+	// conflict. This used to be discarded and replaced by a read-back of
+	// sc.AllowFunnel[hp], which is our own map literal set to true a few lines
+	// up and which SetServeConfig never mutates: the branch was dead and the
+	// function returned success unconditionally, so a refused Funnel looked
+	// like a working one to the C caller.
+	if err := lc.SetServeConfig(ctx, sc); err != nil {
+		return s.recErr(fmt.Errorf("libtailscale: failed to enable funnel: %w", err))
 	}
 
 	return 0
@@ -674,7 +752,7 @@ func TsnetGetAuthURL(sd C.int, buf *C.char, buflen C.size_t) C.int {
 		out[0] = '\x00'
 		return C.EBADF
 	}
-	lc, err := s.s.LocalClient()
+	lc, err := s.localClient()
 	if err != nil {
 		return s.recErr(err)
 	}
@@ -696,7 +774,7 @@ func TsnetGetBackendState(sd C.int, buf *C.char, buflen C.size_t) C.int {
 		out[0] = '\x00'
 		return C.EBADF
 	}
-	lc, err := s.s.LocalClient()
+	lc, err := s.localClient()
 	if err != nil {
 		return s.recErr(err)
 	}
