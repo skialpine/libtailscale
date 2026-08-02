@@ -1,6 +1,9 @@
 package main
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"testing"
 	"time"
 
@@ -75,5 +78,45 @@ func TestExtractIP(t *testing.T) {
 
 	if got6 != want6 {
 		t.Errorf("ipv6 port stripping failed %s != %s", got6, want6)
+	}
+}
+
+// TestLocalAPIGoesThroughOmitAuthHelper asserts that every LocalAPI client in
+// this file is obtained via (*server).localClient(), which sets OmitAuth, and
+// never via s.s.LocalClient() directly.
+//
+// Without OmitAuth, local.Client.DoLocalRequest calls
+// safesocket.LocalTCPPortAndToken() on every request, which on macOS runs
+// `lsof -c IPNExtension` — a fork+exec per LocalAPI call, useless for tsnet
+// (see the localClient doc comment), and a crash under ASan. The regression
+// shape this catches is a new or reverted call site going straight to
+// s.s.LocalClient(): it compiles, it works, and it silently reintroduces the
+// forks. A runtime assertion would only cover the call sites the test itself
+// exercises; this covers all of them, including ones not yet written.
+func TestLocalAPIGoesThroughOmitAuthHelper(t *testing.T) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "tailscale.go", nil, 0) // 0 => comments dropped
+	if err != nil {
+		t.Fatalf("parsing tailscale.go: %v", err)
+	}
+
+	for _, decl := range f.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Name.Name == "localClient" { // the one legitimate caller
+			continue
+		}
+		ast.Inspect(fn, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "LocalClient" {
+				return true
+			}
+			t.Errorf("%s: %s calls LocalClient() directly; use s.localClient() so OmitAuth is set",
+				fset.Position(call.Pos()), fn.Name.Name)
+			return true
+		})
 	}
 }

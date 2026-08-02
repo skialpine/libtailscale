@@ -21,6 +21,7 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/unix"
+	"tailscale.com/client/local"
 	"tailscale.com/hostinfo"
 	"tailscale.com/ipn"
 	"tailscale.com/tsnet"
@@ -40,6 +41,46 @@ type server struct {
 	s       *tsnet.Server
 	lastErr string
 	started bool
+
+	omitAuthOnce sync.Once
+}
+
+// localClient returns the server's LocalAPI client with OmitAuth set.
+//
+// Every request through local.Client goes through DoLocalRequest, which by
+// default calls safesocket.LocalTCPPortAndToken() to attach a Basic-Auth
+// header (client/local/local.go). On macOS that resolves to
+// readMacosSameUserProof(), which runs `lsof -n -a -u<uid> -c IPNExtension -F`
+// — one fork+exec per LocalAPI request. Its purpose is to find the LocalAPI
+// port and token of the sandboxed Mac App Store Tailscale GUI, which has
+// nothing to do with us: tsnet serves its own LocalAPI over an in-process
+// memnet listener and sets no RequiredPassword on that handler
+// (tsnet/tsnet.go, where localClient is built as &local.Client{Dial: lal.Dial}).
+// So the token is never checked, and on a Mac without the GUI app installed
+// lsof matches nothing and the lookup fails anyway. Pure waste — and `lsof -u`
+// walks every fd of every process owned by the user, so it is not cheap.
+//
+// It is also a crash: Decenza ships ASan-instrumented debug builds, and
+// fork() in a multithreaded ASan process can inherit a permanently-locked
+// allocator lock in the child ("BUG IN CLIENT OF LIBPLATFORM: os_unfair_lock
+// is corrupt", "crashed on child side of fork pre-exec"). Same failure mode
+// as the `dscl` exec that ts_omit_ssh fixed; see CLAUDE.md. TsnetGetAuthURL
+// and TsnetGetBackendState are polled during connect, so this fired often.
+//
+// OmitAuth is the documented lever for exactly this case — local.go's comment
+// on the field says it is "meant for when Dial is set and the LocalAPI is
+// being proxied", and tsnet does set Dial.
+//
+// sync.Once rather than a plain assignment: all three LocalAPI call sites
+// share one *local.Client, and Once gives the happens-before that orders the
+// write ahead of every reader that obtains the client through here.
+func (s *server) localClient() (*local.Client, error) {
+	lc, err := s.s.LocalClient()
+	if err != nil {
+		return nil, err
+	}
+	s.omitAuthOnce.Do(func() { lc.OmitAuth = true })
+	return lc, nil
 }
 
 func getServer(sd C.int) *server {
@@ -589,7 +630,7 @@ func TsnetEnableFunnelToLocalhostPlaintextHttp1(sd C.int, localhostPort C.int) C
 	}
 
 	ctx := context.Background()
-	lc, err := s.s.LocalClient()
+	lc, err := s.localClient()
 	if err != nil {
 		return s.recErr(err)
 	}
@@ -674,7 +715,7 @@ func TsnetGetAuthURL(sd C.int, buf *C.char, buflen C.size_t) C.int {
 		out[0] = '\x00'
 		return C.EBADF
 	}
-	lc, err := s.s.LocalClient()
+	lc, err := s.localClient()
 	if err != nil {
 		return s.recErr(err)
 	}
@@ -696,7 +737,7 @@ func TsnetGetBackendState(sd C.int, buf *C.char, buflen C.size_t) C.int {
 		out[0] = '\x00'
 		return C.EBADF
 	}
-	lc, err := s.s.LocalClient()
+	lc, err := s.localClient()
 	if err != nil {
 		return s.recErr(err)
 	}
