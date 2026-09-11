@@ -280,10 +280,16 @@ above.
    and update the three per-platform SHA-256 hashes from the release's
    `manifest.json`.
 
-## Local builds need two env vars (diagnosed 2026-09-11)
+## Local builds: the Makefile handles it (diagnosed 2026-09-11)
 
-A bare `make libtailscale.a` or `go test` fails on a current macOS box, for two
-independent reasons. Neither is caused by anything in this fork, and CI is
+**`make libtailscale.a` and `make test` both work bare** — the Makefile sets
+`GOTOOLCHAIN` and `SDKROOT` itself, inside an `ifndef CI` block so GitHub
+Actions (which always sets `CI=true`) keeps using exactly what the workflow
+pins. `make print-env` shows what it applied; it prints empty under `CI=true`.
+The rest of this section is *why*, for when it stops working.
+
+Two independent reasons a bare `make` / `go test` would otherwise fail on a
+current macOS box. Neither is caused by anything in this fork, and CI is
 unaffected — `release.yml` pins `GO_VERSION: "1.25.5"` and runs on a
 GitHub-hosted runner whose Xcode and SDK are consistent with each other.
 
@@ -295,11 +301,13 @@ instead. Under Go 1.27 the pinned `github.com/go-json-experiment/json`
     undefined: json.SkipFunc
     undefined: json.DiscardUnknownMembers
 
-Fix: `GOTOOLCHAIN=go1.25.5`. Prefer the env var over adding a `toolchain` line
-to `go.mod` — `go.mod`/`go.sum` are currently byte-identical to upstream's,
-which is what makes it cheap to confirm after a merge that the `tailscale.com`
-pin didn't move and the `ts_omit_*` / `exec.Command` audits still hold. Don't
-give that up for a local convenience.
+Fixed by the Makefile setting `GOTOOLCHAIN`, read out of `go.mod`'s own `go`
+directive rather than hardcoded, so it cannot drift from the real pin. Note
+what was deliberately *not* done: adding a `toolchain` line to `go.mod`.
+`go.mod`/`go.sum` are currently byte-identical to upstream's, which is what
+makes it cheap to confirm after a merge that the `tailscale.com` pin didn't
+move and the `ts_omit_*` / `exec.Command` audits still hold. Don't give that
+up for a local convenience.
 
 **2. Xcode/CLT SDK split — affects linking executables only, i.e. `go test`.**
 `xcode-select -p` points at `/Applications/Xcode.app`, which ships `ld-1267`
@@ -311,26 +319,33 @@ declare `arm64e.x1` slices that the older `ld` cannot parse:
     .../MacOSX27.0.sdk/usr/lib/libresolv.9.tbd:4:20: error: unknown architecture
                        arm64e.x1-macos, arm64e.x1-maccatalyst ]
 
-So the build mixes Xcode's old linker with the CLT's newer SDK. Fix by pinning
-both halves to Xcode:
-
-    export SDKROOT=/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk
+So the build mixes Xcode's old linker with the CLT's newer SDK. Fixed by the
+Makefile setting `SDKROOT` to the SDK belonging to whichever developer dir
+`xcode-select -p` reports, pairing the linker with its own SDK. It is derived,
+not hardcoded to `/Applications/Xcode.app`: if the active dir is the Command
+Line Tools that path doesn't exist and nothing is set, which is correct — the
+CLT's `ld` and SDK already match each other.
 
 This affects `go test` and anything else that links a Mach-O executable.
 `-buildmode=c-archive` does **not** link, so `make libtailscale.a` needs only
 `GOTOOLCHAIN` — which is why a release can be cut without ever noticing this.
 
-**Verified working combinations** (`make print-tags` set, arm64):
+**Verified on arm64 with no env vars exported at all:** `make libtailscale.a`
+produces a 50368736-byte archive; `make test` reports `ok
+github.com/tailscale/libtailscale` with no `ld` warnings.
 
-| command | env needed | result |
-|---|---|---|
-| `make libtailscale.a` | `GOTOOLCHAIN` only | 50368736-byte archive |
-| `go test -run 'TestConn\|TestLocalAPIGoesThroughOmitAuthHelper'` | `GOTOOLCHAIN` + `SDKROOT` | `ok`, with `ld: warning: object file ... built for newer 'macOS' version (27.0) than being linked (26.5)` |
-| same, plus `MACOSX_DEPLOYMENT_TARGET=15.0` | all three | `ok`, no warnings |
+`make test` is deliberately **untagged**, matching `test.yml`'s `go test -v
+./...`. Building `./...` with `TS_OMIT_TAGS` does not compile — `tsnetctest`
+and `tstestcontrol` reach `tailscale.com/ssh/tailssh`, which under
+`ts_omit_ssh` fails with `*ipnlocal.LocalBackend does not implement
+ipnLocalBackend (missing method GetSSH_HostKeys)`. The tagged configuration is
+what the release jobs build, and that is where it gets exercised.
 
-The `make` targets already set `MACOSX_DEPLOYMENT_TARGET` and the
-`-mmacos-version-min` CGO flags themselves; that third variable is only needed
-when invoking `go test`/`go build` by hand.
+If you invoke `go test` / `go build` by hand rather than through `make`, you
+also want `MACOSX_DEPLOYMENT_TARGET=15.0` and the matching
+`-mmacos-version-min` CGO flags, or the link emits `ld: warning: object file
+... was built for newer 'macOS' version (27.0) than being linked`. The `make`
+targets set those themselves.
 
 Two alternatives, neither taken: `sudo xcode-select -s
 /Library/Developer/CommandLineTools` pairs the *newer* `ld-27037.1` with the

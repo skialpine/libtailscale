@@ -26,6 +26,46 @@ ifeq ($(GOOS),darwin)
 	DARWIN_DEPLOYMENT_TARGET := MACOSX_DEPLOYMENT_TARGET=$(MACOS_TARGET)
 endif
 
+# --- Local developer environment -------------------------------------------
+# Two things break a bare `make` / `go test` on a developer Mac. Both are
+# environmental rather than anything in this tree, and both are skipped when
+# CI is set (GitHub Actions always sets CI=true) so the release build keeps
+# using exactly what the workflow pins. See CLAUDE.md, "Local builds need two
+# env vars", for the full diagnosis.
+ifndef CI
+
+# 1. go.mod's `go` directive is a *minimum*, so a newer local Go gets used and
+#    the pinned go-json-experiment/json fails with `undefined: json.SkipFunc`.
+#    Pin the toolchain to what go.mod asks for -- read from go.mod rather than
+#    hardcoded, so this cannot drift from the real pin the way a third copy of
+#    the version number would.
+GO_MOD_VERSION := $(shell awk '/^go /{print $$2; exit}' go.mod)
+ifneq ($(GO_MOD_VERSION),)
+GOTOOLCHAIN ?= go$(GO_MOD_VERSION)
+export GOTOOLCHAIN
+endif
+
+# 2. Linking an executable (i.e. `go test`; c-archive builds don't link, which
+#    is why `make libtailscale.a` never tripped over this) can pick up the
+#    Command Line Tools' SDK while using Xcode's older ld, which then cannot
+#    parse the newer .tbd stubs:
+#        ld: multiple errors: tapi error: malformed file
+#        ... error: unknown architecture arm64e.x1-macos
+#    Pair the SDK with whichever developer dir is actually active. Derived from
+#    xcode-select rather than hardcoding /Applications/Xcode.app. If the active
+#    dir is the Command Line Tools this path doesn't exist and nothing is set --
+#    correct, because the CLT's own ld and SDK already match each other.
+ifeq ($(GOOS),darwin)
+XCODE_DEVELOPER_DIR := $(shell xcode-select -p 2>/dev/null)
+XCODE_SDKROOT := $(XCODE_DEVELOPER_DIR)/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk
+ifneq ($(wildcard $(XCODE_SDKROOT)),)
+SDKROOT ?= $(XCODE_SDKROOT)
+export SDKROOT
+endif
+endif
+
+endif # CI
+
 # --- Android configuration -------------------------------------------------
 # Android c-shared builds use the NDK's per-target clang as the cgo compiler.
 # Override on the command line / in CI:
@@ -113,6 +153,21 @@ shared: libtailscale.so ## Builds libtailscale.so for the target platform
 .PHONY: print-tags
 print-tags: ## Print TS_OMIT_TAGS (for CI steps that can't route through this Makefile, e.g. release.yml's lipo'd macOS build)
 	@echo $(TS_OMIT_TAGS)
+
+.PHONY: print-env
+print-env: ## Print the toolchain/SDK overrides this Makefile applies locally (empty under CI)
+	@echo "GOTOOLCHAIN=$(GOTOOLCHAIN)"
+	@echo "SDKROOT=$(SDKROOT)"
+
+# Deliberately untagged, matching test.yml's `go test -v ./...`. Building
+# ./... with TS_OMIT_TAGS does not compile: tsnetctest and tstestcontrol reach
+# tailscale.com/ssh/tailssh, which under ts_omit_ssh fails with
+# `*ipnlocal.LocalBackend does not implement ipnLocalBackend (missing method
+# GetSSH_HostKeys)`. The tagged configuration is what the release jobs build,
+# and that is where it gets exercised.
+.PHONY: test
+test: ## Run the Go test suite, as test.yml does (linking a test binary needs the SDKROOT pairing above)
+	$(DARWIN_DEPLOYMENT_TARGET) CGO_CFLAGS="$(CGO_CFLAGS) $(DARWIN_CGO_CFLAGS)" CGO_LDFLAGS="$(CGO_LDFLAGS) $(DARWIN_CGO_LDFLAGS)" go test ./...
 
 .PHONY: clean
 clean: ## Clean up build artifacts
