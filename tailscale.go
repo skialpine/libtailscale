@@ -669,7 +669,7 @@ func TsnetStatusJSON(sd C.int, jsonOut **C.char) C.int {
 	// Loopback()'s TCP listener it cannot be reclaimed by the OS while
 	// the process is suspended (iOS), so status reads keep working on
 	// long-lived nodes.
-	lc, err := s.s.LocalClient()
+	lc, err := s.localClient()
 	if err != nil {
 		return s.recErr(err)
 	}
