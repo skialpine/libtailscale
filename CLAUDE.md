@@ -10,13 +10,30 @@ different in this fork and why.
 
 ## Branch strategy
 
-- **`main`** mirrors upstream Tailscale's `libtailscale` history. Keep it
-  clean so it's easy to pull upstream updates (`git fetch upstream && git
-  merge upstream/main` or similar) without fighting Decenza-specific commits.
-  Occasionally a fork commit gets merged into `main` via PR (e.g. PR #1,
-  `66c63af`, the Android netmon-interface-getter fix) when it's the kind of
-  thing upstream might plausibly want too — that's fine, but it's the
-  exception, not the rule.
+- **`main`** is *intended* to mirror upstream Tailscale's `libtailscale`
+  history, kept clean so it's easy to pull upstream updates (`git fetch
+  upstream && git merge upstream/main` or similar) without fighting
+  Decenza-specific commits. Occasionally a fork commit gets merged into `main`
+  via PR (e.g. PR #1, `66c63af`, the Android netmon-interface-getter fix) when
+  it's the kind of thing upstream might plausibly want too — that's fine, but
+  it's the exception, not the rule.
+
+  **It does not currently hold.** As of 2026-09-11 `main` is 4 commits ahead
+  of `upstream/main` with fork-only work: `f470665` (the original fork
+  commit), `e97d912`, and the `f9667b5`/`14c1f78` strip-and-revert pair. So
+  `main` is not a clean upstream mirror and a naive `git merge upstream/main`
+  into it will not be a fast-forward. Sync upstream into `decenza-main`
+  directly (that is what was done for the 2026-09-11 merge) rather than
+  treating `main` as an upstream staging area, or first rebase those four
+  commits off `main`.
+
+- There is **no `upstream` remote by default** in a fresh clone — only
+  `origin` (`skialpine/libtailscale`). Add it with
+  `git remote add upstream https://github.com/tailscale/libtailscale.git`.
+  Note the side effect: with both remotes present, bare `gh` commands resolve
+  to `tailscale/libtailscale` and fail with `HTTP 404: workflow release.yml
+  not found on the default branch`. Pass `--repo skialpine/libtailscale` to
+  every `gh` invocation.
 - **`decenza-main`** is the actual fork trunk. All Decenza-specific work
   happens here: Android build targets, status accessor exports, the release
   pipeline, and the build-tag trimming below. It branched off upstream history
@@ -232,6 +249,17 @@ The `ios` and `ios-sim` and `android` release jobs call `make c-archive-ios`/
 `make android` directly and pick up Makefile changes automatically; no
 equivalent gotcha there.
 
+**`MACOS_TARGET` is now load-bearing in `release.yml`, in the opposite
+direction.** Upstream `59d4bb8` changed the Makefile's `MACOS_TARGET := 15.0`
+to `?=`, so an environment variable now overrides it. `release.yml` sets
+`MACOS_TARGET: "15.0"` as a workflow-level `env:`, which previously the
+Makefile ignored and which is now what actually wins for every `make` call in
+every release job. The two values agree today, so nothing changed — but the
+comment above that line ("Keep in sync with the Makefile MACOS_TARGET") is no
+longer merely advisory: **editing the Makefile default alone now silently has
+no effect in CI**, because the workflow env var overrides it. Change both, or
+delete the workflow env var and let the Makefile be the single source.
+
 Other workflows (`test.yml`, `swift.yml`, `ruby.yml`, `sourcepkg.yml`) are
 upstream's own CI for the Go test suite and the Swift/Ruby/Python language
 bindings — none of them build the macOS/iOS/Android release artifacts Decenza
@@ -241,7 +269,8 @@ above.
 ## Cutting a release
 
 1. Land changes on `decenza-main`, verify `make libtailscale.a` (or whichever
-   target) builds clean locally first.
+   target) builds clean locally first — see "Local builds need two env vars"
+   below, this does not work with a bare `make` on a current macOS box.
 2. `git tag decenza-v<tailscale-version>-<n>` (increment `n` for a re-release
    at the same tailscale.com version; see `git tag -l` for the existing
    sequence) and `git push origin <tag>`.
@@ -250,3 +279,61 @@ above.
 4. In Decenza-Desktop, bump `TSNET_TAG` in `cmake/tsnet.cmake` to the new tag
    and update the three per-platform SHA-256 hashes from the release's
    `manifest.json`.
+
+## Local builds need two env vars (diagnosed 2026-09-11)
+
+A bare `make libtailscale.a` or `go test` fails on a current macOS box, for two
+independent reasons. Neither is caused by anything in this fork, and CI is
+unaffected — `release.yml` pins `GO_VERSION: "1.25.5"` and runs on a
+GitHub-hosted runner whose Xcode and SDK are consistent with each other.
+
+**1. Go toolchain — affects every target.** `go.mod` says `go 1.25.5` with no
+`toolchain` directive, which is a *minimum*, so a newer local Go is used
+instead. Under Go 1.27 the pinned `github.com/go-json-experiment/json`
+(`v0.0.0-20250813024750-ebf49471dced`) fails to compile:
+
+    undefined: json.SkipFunc
+    undefined: json.DiscardUnknownMembers
+
+Fix: `GOTOOLCHAIN=go1.25.5`. Prefer the env var over adding a `toolchain` line
+to `go.mod` — `go.mod`/`go.sum` are currently byte-identical to upstream's,
+which is what makes it cheap to confirm after a merge that the `tailscale.com`
+pin didn't move and the `ts_omit_*` / `exec.Command` audits still hold. Don't
+give that up for a local convenience.
+
+**2. Xcode/CLT SDK split — affects linking executables only, i.e. `go test`.**
+`xcode-select -p` points at `/Applications/Xcode.app`, which ships `ld-1267`
+(Jun 2026) and SDKs only up to `MacOSX26.5`. But `xcrun --show-sdk-path`
+resolves to the *Command Line Tools* SDK, `MacOSX27.0`, whose `.tbd` stubs
+declare `arm64e.x1` slices that the older `ld` cannot parse:
+
+    ld: multiple errors: tapi error: malformed file
+    .../MacOSX27.0.sdk/usr/lib/libresolv.9.tbd:4:20: error: unknown architecture
+                       arm64e.x1-macos, arm64e.x1-maccatalyst ]
+
+So the build mixes Xcode's old linker with the CLT's newer SDK. Fix by pinning
+both halves to Xcode:
+
+    export SDKROOT=/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk
+
+This affects `go test` and anything else that links a Mach-O executable.
+`-buildmode=c-archive` does **not** link, so `make libtailscale.a` needs only
+`GOTOOLCHAIN` — which is why a release can be cut without ever noticing this.
+
+**Verified working combinations** (`make print-tags` set, arm64):
+
+| command | env needed | result |
+|---|---|---|
+| `make libtailscale.a` | `GOTOOLCHAIN` only | 50368736-byte archive |
+| `go test -run 'TestConn\|TestLocalAPIGoesThroughOmitAuthHelper'` | `GOTOOLCHAIN` + `SDKROOT` | `ok`, with `ld: warning: object file ... built for newer 'macOS' version (27.0) than being linked (26.5)` |
+| same, plus `MACOSX_DEPLOYMENT_TARGET=15.0` | all three | `ok`, no warnings |
+
+The `make` targets already set `MACOSX_DEPLOYMENT_TARGET` and the
+`-mmacos-version-min` CGO flags themselves; that third variable is only needed
+when invoking `go test`/`go build` by hand.
+
+Two alternatives, neither taken: `sudo xcode-select -s
+/Library/Developer/CommandLineTools` pairs the *newer* `ld-27037.1` with the
+`MacOSX27.0` SDK and needs no env vars, but it's a global switch that also
+changes what Decenza's own Qt builds compile against; or update Xcode so its
+`ld` and SDK catch up to the CLT's.
