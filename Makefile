@@ -8,20 +8,20 @@ endif
 
 export CGO_ENABLED=1
 
-# This should match the minimum target in the xCode project
-# The wrapper lib currently requires features available in
-# MacOS 15.0 (Sequoia)
+# Decenza's macOS floor (Qt 6.12: 14.4). The Swift TailscaleKit project targets 15.0
+# (swift/TailscaleKit.xcodeproj); the c-archive Decenza links does not need it. The
+# availability errors below make any API newer than MACOS_TARGET a build failure.
 #
 # `?=` rather than `:=` so the environment can override it. With `:=`,
 # `MACOS_TARGET=14.0 make c-archive` is silently ignored — make reports success
-# and builds 15.0 anyway, because an environment variable does not override a
+# and builds the default anyway, because an environment variable does not override a
 # makefile assignment. Only `make MACOS_TARGET=14.0 c-archive` worked, which is
 # easy to get wrong and gives no signal when you do.
-MACOS_TARGET ?= 15.0
+MACOS_TARGET ?= 14.4
 
 # Set macOS-specific flags for darwin builds
 ifeq ($(GOOS),darwin)
-	DARWIN_CGO_CFLAGS := -mmacos-version-min=$(MACOS_TARGET)
+	DARWIN_CGO_CFLAGS := -mmacos-version-min=$(MACOS_TARGET) -Werror=unguarded-availability -Werror=unguarded-availability-new
 	DARWIN_CGO_LDFLAGS := -mmacos-version-min=$(MACOS_TARGET)
 	DARWIN_DEPLOYMENT_TARGET := MACOSX_DEPLOYMENT_TARGET=$(MACOS_TARGET)
 endif
