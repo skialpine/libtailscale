@@ -159,15 +159,34 @@ print-env: ## Print the toolchain/SDK overrides this Makefile applies locally (e
 	@echo "GOTOOLCHAIN=$(GOTOOLCHAIN)"
 	@echo "SDKROOT=$(SDKROOT)"
 
+.PHONY: test
+test: test-go test-ruby test-swift ## Runs all tests available on the host platform
+
 # Deliberately untagged, matching test.yml's `go test -v ./...`. Building
 # ./... with TS_OMIT_TAGS does not compile: tsnetctest and tstestcontrol reach
 # tailscale.com/ssh/tailssh, which under ts_omit_ssh fails with
 # `*ipnlocal.LocalBackend does not implement ipnLocalBackend (missing method
 # GetSSH_HostKeys)`. The tagged configuration is what the release jobs build,
 # and that is where it gets exercised.
-.PHONY: test
-test: ## Run the Go test suite, as test.yml does (linking a test binary needs the SDKROOT pairing above)
-	$(DARWIN_DEPLOYMENT_TARGET) CGO_CFLAGS="$(CGO_CFLAGS) $(DARWIN_CGO_CFLAGS)" CGO_LDFLAGS="$(CGO_LDFLAGS) $(DARWIN_CGO_LDFLAGS)" go test ./...
+.PHONY: test-go
+test-go: ## Runs Go and C integration tests (linking a test binary needs the SDKROOT pairing above)
+	$(DARWIN_DEPLOYMENT_TARGET) CGO_CFLAGS="$(CGO_CFLAGS) $(DARWIN_CGO_CFLAGS)" CGO_LDFLAGS="$(CGO_LDFLAGS) $(DARWIN_CGO_LDFLAGS)" go test -v ./...
+
+.PHONY: test-ruby
+test-ruby: ## Runs Ruby binding tests (requires ruby, bundler)
+	@if command -v bundle >/dev/null 2>&1 && [ -f ruby/Gemfile ]; then \
+		cd ruby && bundle exec rake test; \
+	else \
+		echo "skipping ruby tests: bundle not found"; \
+	fi
+
+.PHONY: test-swift
+test-swift: ## Runs Swift binding tests (requires macOS, xcodebuild)
+	@if [ "$(GOOS)" = "darwin" ] && command -v xcodebuild >/dev/null 2>&1; then \
+		cd swift && $(MAKE) test; \
+	else \
+		echo "skipping swift tests: requires macOS with xcodebuild"; \
+	fi
 
 .PHONY: clean
 clean: ## Clean up build artifacts

@@ -266,6 +266,26 @@ bindings — none of them build the macOS/iOS/Android release artifacts Decenza
 consumes, so they don't need `TS_OMIT_TAGS` and weren't touched by any of the
 above.
 
+## Version as seen by Tailscale (TS-2026-012, merged 2026-10-14)
+
+Tailscale's bulletin TS-2026-012 ("libtailscale before 0.2.0:
+`tailscale_getremoteaddr` could return another peer's address under load")
+is fixed by upstream `258321b` ("frame the listener fd-passing records"),
+merged into `decenza-main` on 2026-10-14 together with the bump to
+`tailscale.com v1.104.1`. `TestGetRemoteAddr` is the regression test.
+
+**There is no libtailscale version string reported to control, so "report
+at least 0.2.0" cannot be done literally.** Upstream has no git tags; the
+`0.2.0` in `python/setup.py`, `ruby/lib/tailscale/version.rb` and
+`sourcepkg/Makefile.src` is binding-package metadata that never reaches the
+Go code. What a node actually sends is `hostinfo.SetApp("libtailscale")`
+(`tailscale.go`) plus `IPNVersion = version.Long()`, i.e. the embedded
+`tailscale.com` module version. Tailscale therefore identifies affected
+nodes as App=libtailscale with tailscale.com < 1.104.1, and the only way to
+stop being flagged is to ship a build whose `go.mod` pins `tailscale.com
+v1.104.1` or later. Keeping `go.mod` byte-identical to upstream's (see
+"Local builds" below) is what makes this easy to confirm after a merge.
+
 ## Cutting a release
 
 1. Land changes on `decenza-main`, verify `make libtailscale.a` (or whichever
