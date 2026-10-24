@@ -266,13 +266,28 @@ bindings — none of them build the macOS/iOS/Android release artifacts Decenza
 consumes, so they don't need `TS_OMIT_TAGS` and weren't touched by any of the
 above.
 
-## Version as seen by Tailscale (TS-2026-012, merged 2026-10-14)
+## Version as seen by Tailscale (TS-2026-012, TS-2026-013)
 
 Tailscale's bulletin TS-2026-012 ("libtailscale before 0.2.0:
 `tailscale_getremoteaddr` could return another peer's address under load")
 is fixed by upstream `258321b` ("frame the listener fd-passing records"),
 merged into `decenza-main` on 2026-10-14 together with the bump to
 `tailscale.com v1.104.1`. `TestGetRemoteAddr` is the regression test.
+
+TS-2026-013 (2026-10-21, leaked keys for eight eMudhra TLS intermediates)
+raised the floor to **1.104.2**, and its fix is the **Go toolchain**, not
+tailscale.com code: Go 1.27.3 adds `distrustedSPKIHashes` to
+`crypto/x509/verify.go` and checks it in `root_darwin.go`, `root_windows.go`
+and the generic `Verify` path. 1.104.1 → 1.104.2 changes no code we compile
+(only `net/dns`, omitted by `ts_omit_dns`). What matters is the `go` directive:
+`release.yml` builds with `go-version-file: go.mod`, so `decenza-v1.104.1-1`
+shipped Go 1.27.1 and is still vulnerable. Check a release with
+`strings <archive> | grep -E '^go1\.'`.
+
+Adopted on `decenza-main` 2026-10-24 (`go 1.27.3`, `tailscale.com v1.104.2`)
+**ahead of upstream**, which was still on 1.104.1. So `go.mod`/`go.sum` differ
+from upstream's in exactly those two lines until upstream bumps; on the next
+upstream merge, take theirs if it is at or above ours.
 
 **There is no libtailscale version string reported to control, so "report
 at least 0.2.0" cannot be done literally.** Upstream has no git tags; the
@@ -281,16 +296,14 @@ at least 0.2.0" cannot be done literally.** Upstream has no git tags; the
 Go code. What a node actually sends is `hostinfo.SetApp("libtailscale")`
 (`tailscale.go`) plus `IPNVersion = version.Long()`, i.e. the embedded
 `tailscale.com` module version. Tailscale therefore identifies affected
-nodes as App=libtailscale with tailscale.com < 1.104.1, and the only way to
-stop being flagged is to ship a build whose `go.mod` pins `tailscale.com
-v1.104.1` or later. Keeping `go.mod` byte-identical to upstream's (see
-"Local builds" below) is what makes this easy to confirm after a merge.
+nodes by the embedded tailscale.com version, and the only way to stop being
+flagged is to ship a build whose `go.mod` pins a version at or above the
+current bulletin floor (1.104.2 as of TS-2026-013).
 
 ## Cutting a release
 
 1. Land changes on `decenza-main`, verify `make libtailscale.a` (or whichever
-   target) builds clean locally first — see "Local builds need two env vars"
-   below, this does not work with a bare `make` on a current macOS box.
+   target) and `make test-go` locally first — see "Local builds" below.
 2. `git tag decenza-v<tailscale-version>-<n>` (increment `n` for a re-release
    at the same tailscale.com version; see `git tag -l` for the existing
    sequence) and `git push origin <tag>`.
@@ -310,13 +323,14 @@ The rest of this section is *why*, for when it stops working.
 
 Two independent reasons a bare `make` / `go test` would otherwise fail on a
 current macOS box. Neither is caused by anything in this fork, and CI is
-unaffected — `release.yml` pins `GO_VERSION: "1.25.5"` and runs on a
-GitHub-hosted runner whose Xcode and SDK are consistent with each other.
+unaffected — `release.yml` installs the Go named by `go.mod`
+(`go-version-file`) and runs on a GitHub-hosted runner whose Xcode and SDK are
+consistent with each other.
 
-**1. Go toolchain — affects every target.** `go.mod` says `go 1.25.5` with no
-`toolchain` directive, which is a *minimum*, so a newer local Go is used
-instead. Under Go 1.27 the pinned `github.com/go-json-experiment/json`
-(`v0.0.0-20250813024750-ebf49471dced`) fails to compile:
+**1. Go toolchain — affects every target.** `go.mod`'s `go` directive has no
+`toolchain` line, so it is a *minimum* and a newer local Go is used instead.
+When `go.mod` said `go 1.25.5`, Go 1.27 failed to compile the then-pinned
+`github.com/go-json-experiment/json` (`v0.0.0-20250813024750-ebf49471dced`):
 
     undefined: json.SkipFunc
     undefined: json.DiscardUnknownMembers
@@ -324,10 +338,14 @@ instead. Under Go 1.27 the pinned `github.com/go-json-experiment/json`
 Fixed by the Makefile setting `GOTOOLCHAIN`, read out of `go.mod`'s own `go`
 directive rather than hardcoded, so it cannot drift from the real pin. Note
 what was deliberately *not* done: adding a `toolchain` line to `go.mod`.
-`go.mod`/`go.sum` are currently byte-identical to upstream's, which is what
-makes it cheap to confirm after a merge that the `tailscale.com` pin didn't
-move and the `ts_omit_*` / `exec.Command` audits still hold. Don't give that
-up for a local convenience.
+Keeping `go.mod`/`go.sum` as close to upstream's as possible is what makes it
+cheap to confirm after a merge that the `tailscale.com` pin didn't move and the
+`ts_omit_*` / `exec.Command` audits still hold; the only sanctioned divergence
+is a security floor upstream hasn't reached yet (see TS-2026-013 above). Don't
+diverge for a local convenience.
+
+`make libtailscale.a` does not depend on `go.mod`, so after a version bump it
+happily reports "up to date" for the old archive. `rm libtailscale.a` first.
 
 **2. Xcode/CLT SDK split — affects linking executables only, i.e. `go test`.**
 `xcode-select -p` points at `/Applications/Xcode.app`, which ships `ld-1267`

@@ -1,10 +1,10 @@
 module github.com/tailscale/libtailscale
 
-go 1.27.1
+go 1.27.3
 
 require (
 	golang.org/x/sys v0.48.0
-	tailscale.com v1.104.1
+	tailscale.com v1.104.2
 )
 
 require (
